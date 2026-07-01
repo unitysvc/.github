@@ -1,0 +1,111 @@
+name: Upload Data to Production (reusable)
+
+# Reusable production upload shared by every unitysvc-services-* repo.
+# Callers invoke it with:
+#   jobs:
+#     upload:
+#       uses: unitysvc/.github/.github/workflows/seller-upload-production.yml@main
+#       secrets: inherit
+#
+# `secrets: inherit` forwards the caller repo's secrets, so the named keys
+# (UNITYSVC_SELLER_PRODUCTION_API_*) and the dynamic provider secrets picked up
+# via toJSON(secrets) below are all available without re-declaring them here.
+#
+# Production uploads are manual (workflow_dispatch in the caller) and assume the
+# service IDs already exist in production (created by an earlier staging run).
+
+on:
+  workflow_call:
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Install unitysvc-sellers
+        run: |
+          python -m pip install --upgrade pip
+          pip install "unitysvc-sellers>=0.2.0"
+
+      - name: Seed seller-secrets store
+        env:
+          UNITYSVC_SELLER_API_KEY: ${{ secrets.UNITYSVC_SELLER_PRODUCTION_API_KEY }}
+          UNITYSVC_SELLER_API_URL: ${{ secrets.UNITYSVC_SELLER_PRODUCTION_API_URL }}
+          ALL_SECRETS_JSON: ${{ toJSON(secrets) }}
+          ALL_VARS_JSON: ${{ toJSON(vars) }}
+        run: |
+          set -euo pipefail
+          # Auto-derive the seller-secret names this repo needs from its source
+          # files: every ${ customer_secrets.X } and ${ secrets.X } reference
+          # under specs/, templates/, or data/. Templated forms like
+          # ${ customer_secrets.{{ params.X }} } are NOT matched directly —
+          # they're covered transitively when the per-service user_parameters_schema
+          # defaults the param to the literal name used by the non-plus variant.
+          #
+          # `|| true` on grep: a repo with no secret references is valid (e.g.
+          # services that need none). Without it, grep's exit-1 trips
+          # `set -o pipefail` and fails the step before the empty-names guard.
+          names="$( { grep -rEhno \
+            '\$\{\s*(customer_secrets|secrets)\.[A-Za-z_][A-Za-z0-9_]*' \
+            specs/ templates/ data/ 2>/dev/null || true; } \
+            | sed -E 's/.*(customer_secrets|secrets)\.([A-Za-z_][A-Za-z0-9_]*).*/\2/' \
+            | sort -u)"
+          if [ -z "$names" ]; then
+            echo "No secret references found under specs/ templates/ data/."
+            exit 0
+          fi
+          echo "Found secret references:"
+          printf '  - %s\n' $names
+          seeded=0
+          missing=0
+          while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            value="$(printf '%s' "$ALL_SECRETS_JSON" | jq -r --arg n "$name" '.[$n] // empty')"
+            if [ -z "$value" ]; then
+              # Fall back to a repo variable (non-sensitive config); secrets win.
+              value="$(printf '%s' "$ALL_VARS_JSON" | jq -r --arg n "$name" '.[$n] // empty')"
+            fi
+            if [ -z "$value" ]; then
+              echo "::warning::Secret '$name' referenced in the repo has no value in GitHub secrets or variables; skipping."
+              missing=$((missing+1))
+              continue
+            fi
+            echo "::add-mask::$value"
+            printf '%s' "$value" | usvc_seller secrets set "$name"
+            seeded=$((seeded+1))
+          done <<< "$names"
+          echo "Seeded $seeded secret(s); $missing missing."
+
+      - name: Upload services
+        env:
+          UNITYSVC_SELLER_API_KEY: ${{ secrets.UNITYSVC_SELLER_PRODUCTION_API_KEY }}
+          UNITYSVC_SELLER_API_URL: ${{ secrets.UNITYSVC_SELLER_PRODUCTION_API_URL }}
+        run: |
+          echo "Uploading + submitting services to production..."
+          # --submit folds the submit-for-review (validate -> pending -> run
+          # tests) into the ingest task, so no separate submit step is needed.
+          usvc_seller specs upload --submit
+
+      - name: Publish services
+        env:
+          UNITYSVC_SELLER_API_KEY: ${{ secrets.UNITYSVC_SELLER_PRODUCTION_API_KEY }}
+          UNITYSVC_SELLER_API_URL: ${{ secrets.UNITYSVC_SELLER_PRODUCTION_API_URL }}
+        run: |
+          echo "Publishing services to make them visible in the catalog..."
+          usvc_seller services set-visibility public --local-ids --data-dir specs --yes
+
+      - name: Upload summary
+        if: always()
+        run: |
+          echo "## Upload Summary (Production)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Uploaded to Backend" >> $GITHUB_STEP_SUMMARY
+          echo "- Backend URL: \`${{ secrets.UNITYSVC_SELLER_PRODUCTION_API_URL }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Triggered manually by: @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY

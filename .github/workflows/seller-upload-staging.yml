@@ -1,0 +1,122 @@
+name: Upload Data to Staging (reusable)
+
+# Reusable staging upload shared by every unitysvc-services-* repo.
+# Callers invoke it with:
+#   jobs:
+#     upload:
+#       permissions:
+#         contents: write   # needed to push override files back to main
+#       uses: unitysvc/.github/.github/workflows/seller-upload-staging.yml@main
+#       secrets: inherit
+#
+# Runs on PR-merge in the caller. Besides uploading, it writes service_id
+# override files back to main (hence contents: write must be granted by the
+# caller job).
+
+on:
+  workflow_call:
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Check out the PR's base branch (main) rather than the detached
+          # merge ref, so the commit-back step can `git push` the service_id
+          # sidecars. The merge is already in base by the time `closed` fires.
+          ref: ${{ github.base_ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Install unitysvc-sellers
+        run: |
+          python -m pip install --upgrade pip
+          pip install "unitysvc-sellers>=0.2.0"
+
+      - name: Seed seller-secrets store
+        env:
+          UNITYSVC_SELLER_API_KEY: ${{ secrets.UNITYSVC_SELLER_STAGING_API_KEY }}
+          UNITYSVC_SELLER_API_URL: ${{ secrets.UNITYSVC_SELLER_STAGING_API_URL }}
+          ALL_SECRETS_JSON: ${{ toJSON(secrets) }}
+          ALL_VARS_JSON: ${{ toJSON(vars) }}
+        run: |
+          set -euo pipefail
+          # See seller-upload-production.yml for the rationale; `|| true` keeps a
+          # repo with no secret references from failing on grep's exit-1 under
+          # set -o pipefail.
+          names="$( { grep -rEhno \
+            '\$\{\s*(customer_secrets|secrets)\.[A-Za-z_][A-Za-z0-9_]*' \
+            specs/ templates/ data/ 2>/dev/null || true; } \
+            | sed -E 's/.*(customer_secrets|secrets)\.([A-Za-z_][A-Za-z0-9_]*).*/\2/' \
+            | sort -u)"
+          if [ -z "$names" ]; then
+            echo "No secret references found under specs/ templates/ data/."
+            exit 0
+          fi
+          echo "Found secret references:"
+          printf '  - %s\n' $names
+          seeded=0
+          missing=0
+          while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            value="$(printf '%s' "$ALL_SECRETS_JSON" | jq -r --arg n "$name" '.[$n] // empty')"
+            if [ -z "$value" ]; then
+              # Fall back to a repo variable (non-sensitive config); secrets win.
+              value="$(printf '%s' "$ALL_VARS_JSON" | jq -r --arg n "$name" '.[$n] // empty')"
+            fi
+            if [ -z "$value" ]; then
+              echo "::warning::Secret '$name' referenced in the repo has no value in GitHub secrets or variables; skipping."
+              missing=$((missing+1))
+              continue
+            fi
+            echo "::add-mask::$value"
+            printf '%s' "$value" | usvc_seller secrets set "$name"
+            seeded=$((seeded+1))
+          done <<< "$names"
+          echo "Seeded $seeded secret(s); $missing missing."
+
+      - name: Upload services
+        env:
+          UNITYSVC_SELLER_API_KEY: ${{ secrets.UNITYSVC_SELLER_STAGING_API_KEY }}
+          UNITYSVC_SELLER_API_URL: ${{ secrets.UNITYSVC_SELLER_STAGING_API_URL }}
+        run: |
+          echo "Uploading + submitting services to staging..."
+          # --submit folds the submit-for-review (validate -> pending -> run
+          # tests) into the ingest task, so no separate submit step is needed.
+          usvc_seller specs upload --submit
+
+      - name: Commit back service_id sidecars
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Folder specs write `<service>/service.json`; param-file specs write
+          # `<name>.service.json` beside the param file. Stage both.
+          find specs -type f \( -name 'service.json' -o -name '*.service.json' \) -exec git add {} +
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: write back service_id sidecars [skip ci]"
+            git push
+          else
+            echo "No service_id sidecars changed"
+          fi
+
+      - name: Publish services
+        env:
+          UNITYSVC_SELLER_API_KEY: ${{ secrets.UNITYSVC_SELLER_STAGING_API_KEY }}
+          UNITYSVC_SELLER_API_URL: ${{ secrets.UNITYSVC_SELLER_STAGING_API_URL }}
+        run: |
+          echo "Publishing services to make them visible in the catalog..."
+          usvc_seller services set-visibility public --local-ids --data-dir specs --yes
+
+      - name: Upload summary
+        if: always()
+        run: |
+          echo "## Upload Summary (Staging)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Uploaded to Backend" >> $GITHUB_STEP_SUMMARY
+          echo "- Backend URL: \`${{ secrets.UNITYSVC_SELLER_STAGING_API_URL }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Triggered by PR: #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
