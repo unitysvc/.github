@@ -36,7 +36,7 @@ jobs:
       - name: Install unitysvc-sellers
         run: |
           python -m pip install --upgrade pip
-          pip install "unitysvc-sellers>=0.2.0"
+          pip install "unitysvc-sellers>=0.2.20"
 
       - name: Seed seller-secrets store
         env:
@@ -46,16 +46,30 @@ jobs:
           ALL_VARS_JSON: ${{ toJSON(vars) }}
         run: |
           set -euo pipefail
-          # See seller-upload-production.yml for the rationale; `|| true` keeps a
-          # repo with no secret references from failing on grep's exit-1 under
-          # set -o pipefail.
+          # Preferred (unitysvc#1709): a repo-committed .env.example manifest
+          # declares its secrets with descriptions and env-aware ${NAME:-default}
+          # values. Export every GitHub variable then secret (secrets win) so the
+          # manifest's defaults resolve to real values, then upload it in one call
+          # — values AND the comment-block descriptions surfaced to customers
+          # (unitysvc#1618). GitHub auto-masks secret values in the log.
+          if [ -f .env.example ]; then
+            echo "Seeding from .env.example (values from GitHub secrets/vars; descriptions from the file)."
+            eval "$(printf '%s' "$ALL_VARS_JSON"    | jq -r 'to_entries[] | select(.key|test("^[A-Z_][A-Z0-9_]*$")) | "export \(.key)=\(.value|@sh)"')"
+            eval "$(printf '%s' "$ALL_SECRETS_JSON" | jq -r 'to_entries[] | select(.key|test("^[A-Z_][A-Z0-9_]*$")) | "export \(.key)=\(.value|@sh)"')"
+            usvc_seller secrets upload .env.example
+            exit 0
+          fi
+          # Fallback for repos with no manifest: auto-derive the referenced names
+          # from the source files and set each from GitHub secrets/vars (values
+          # only, no descriptions). `|| true` keeps a repo with no references from
+          # tripping grep's exit-1 under set -o pipefail.
           names="$( { grep -rEhno \
             '\$\{\s*(customer_secrets|secrets)\.[A-Za-z_][A-Za-z0-9_]*' \
             specs/ templates/ data/ 2>/dev/null || true; } \
             | sed -E 's/.*(customer_secrets|secrets)\.([A-Za-z_][A-Za-z0-9_]*).*/\2/' \
             | sort -u)"
           if [ -z "$names" ]; then
-            echo "No secret references found under specs/ templates/ data/."
+            echo "No .env.example and no secret references under specs/ templates/ data/."
             exit 0
           fi
           echo "Found secret references:"
