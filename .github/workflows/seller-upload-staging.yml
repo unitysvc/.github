@@ -19,6 +19,9 @@ on:
 jobs:
   upload:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -46,17 +49,19 @@ jobs:
           ALL_VARS_JSON: ${{ toJSON(vars) }}
         run: |
           set -euo pipefail
-          # Preferred (unitysvc#1709): a repo-committed .env.example manifest
+          # Seller secrets live in a repo-committed seller.secrets.txt manifest (the
+          # seller-secrets convention; supersedes the seller.secrets.txt manifest of
+          # unitysvc#1709). It declares each secret with descriptions and env-aware
           # declares its secrets with descriptions and env-aware ${NAME:-default}
           # values. Export every GitHub variable then secret (secrets win) so the
           # manifest's defaults resolve to real values, then upload it in one call
           # — values AND the comment-block descriptions surfaced to customers
           # (unitysvc#1618). GitHub auto-masks secret values in the log.
-          if [ -f .env.example ]; then
-            echo "Seeding from .env.example (values from GitHub secrets/vars; descriptions from the file)."
+          if [ -f seller.secrets.txt ]; then
+            echo "Seeding from seller.secrets.txt (values from GitHub secrets/vars; descriptions from the file)."
             eval "$(printf '%s' "$ALL_VARS_JSON"    | jq -r 'to_entries[] | select(.key|test("^[A-Z_][A-Z0-9_]*$")) | "export \(.key)=\(.value|@sh)"')"
             eval "$(printf '%s' "$ALL_SECRETS_JSON" | jq -r 'to_entries[] | select(.key|test("^[A-Z_][A-Z0-9_]*$")) | "export \(.key)=\(.value|@sh)"')"
-            usvc_seller secrets upload .env.example
+            usvc_seller secrets upload seller.secrets.txt
             exit 0
           fi
           # Fallback for repos with no manifest: auto-derive the referenced names
@@ -69,7 +74,7 @@ jobs:
             | sed -E 's/.*(customer_secrets|secrets)\.([A-Za-z_][A-Za-z0-9_]*).*/\2/' \
             | sort -u)"
           if [ -z "$names" ]; then
-            echo "No .env.example and no secret references under specs/ templates/ data/."
+            echo "No seller.secrets.txt and no secret references under specs/ templates/ data/."
             exit 0
           fi
           echo "Found secret references:"
