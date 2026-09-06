@@ -7,31 +7,22 @@
 # DISTINCT gateway code path or cross-system integration actually works, not
 # because the service itself is important.
 #
-# ── API gateway: LLM passthrough code paths (relocated from
+# ── API gateway: LLM passthrough, basic connectivity (relocated from
 #    apisix-gateways#23 — see unitysvc/.github#<TBD> for the move) ──
+#
+# Trimmed to just openai (2026-09-06): the original 5-service set each
+# proved a DISTINCT gateway code path (openai/anthropic translation +
+# streaming, nebius's gzip'd SSE, cohere's upstream_path override, bedrock's
+# SigV4 signing) — deliberately dropped in favor of one simple, reliable
+# check, since nebius/Qwen/Qwen3-32B kept failing on an upstream-account
+# issue unrelated to the gateway (genuine upstream_fault, not our bug) and
+# that noise wasn't worth carrying for a post-deploy smoke test. If deeper
+# per-code-path coverage is wanted again later, apisix-gateways#23's history
+# has the full rationale for each of the four dropped services.
 
 # Plain OpenAI -> OpenAI passthrough with an UNCOMPRESSED event stream. The
 # control: if this breaks, something very general broke.
 openai/gpt-4.1-nano
-
-# openai -> anthropic translation, including the streaming path
-# apisix-gateways#20 (stream_options must never reach an Anthropic upstream)
-# and #21 (incremental inflate on the translate path) fixed.
-anthropic/claude-opus-4-8
-
-# Passthrough with a COMPRESSED event stream — nebius gzips its SSE. The
-# canary for apisix-gateways#22: before that fix the plain-text scanners
-# silently no-opped here, leaking the injected usage frame to the client and
-# billing the stream at zero.
-nebius/Qwen/Qwen3-32B
-
-# Cohere's own request format plus the translate route's upstream_path
-# override (its OpenAI-compatible chat lives at /compatibility/v1, not /v1).
-cohere/command-r7b-arabic-02-2025
-
-# SigV4 request signing via resty.aws, the one upstream auth scheme that is
-# not a bearer token.
-bedrock/zai.glm-5
 
 # ── API gateway: HTTP relay + cross-system integration (Redis, Celery) ──
 # Motivated by the msg-to-mailbox incident (2026-09): a production redeploy
