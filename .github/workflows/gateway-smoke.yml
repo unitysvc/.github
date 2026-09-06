@@ -1,0 +1,190 @@
+name: Gateway smoke test
+
+# Reusable (workflow_call) post-deploy smoke test: runs the real published
+# "Connectivity test" document of a handful of representative services
+# against a deployed gateway, over the same network path customers use.
+#
+# Motivated by a production incident (2026-09): a redeploy left the gateway
+# silently unroutable for several services, and nothing caught it until a
+# human happened to test the one broken service by hand. The Lua/unit test
+# suites prove a stage behaves correctly in isolation; they cannot catch "this
+# stage is inactive on the route that needed it" or "the deploy broke a whole
+# subsystem" — only a real end-to-end call through the live gateway can.
+#
+# This is a reusable workflow, not a standalone one: it has no `on:` trigger
+# of its own besides `workflow_call`. Callers `uses:` this as a job (needing
+# a deploy job to finish first: `needs: deploy`) with `secrets: inherit`:
+#   - unitysvc's deploy-production.yml (environment: prod) and
+#     deploy-staging.yml (environment: staging) — every deploy, both envs.
+#   - unitysvc-k8s's deploy-app.yml (environment: prod) — chart-only
+#     production deploys that bypass the app-image-gated unitysvc flow.
+#   - unitysvc-staging's own gateway-smoke.yml (environment: staging,
+#     hardcoded) — this repo has no GitHub-Actions-driven deploy of its own
+#     (update-staging.sh runs over SSH from unitysvc's deploy-staging.yml),
+#     so it's workflow_dispatch + a daily schedule instead of a deploy hook.
+#
+# Requires the caller to pass (or `secrets: inherit`) the org secrets
+# UNITYSVC_SELLER_{STAGING,PRODUCTION}_API_{KEY,URL} (seller role — what
+# `usvc seller services run-tests` itself authenticates as) and, for the
+# final completion notification, UNITYSVC_API_KEY / UNITYSVC_API_URL (the
+# labs CUSTOMER credential — msg-to-mailbox delivers only to the caller's
+# own verified primary email, which requires a real customer identity, not
+# ops_customer and not the seller key: seller and customer are different
+# roles, and msg-to-mailbox is a customer-facing consumption route). One
+# customer credential pair covers both environments — it's the same labs
+# account either way.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Which gateway to test
+        type: string
+        default: staging
+      services:
+        description: >-
+          Comma-separated service names to override the default set in
+          .github/gateway-smoke-services.txt
+        type: string
+        required: false
+        default: ""
+      fail_on_upstream_fault:
+        description: Also fail the build when only the provider/receiver misbehaved
+        type: boolean
+        default: false
+      notify:
+        description: Send a completion notification via msg-to-mailbox as the labs customer
+        type: boolean
+        default: true
+    secrets:
+      UNITYSVC_SELLER_STAGING_API_KEY:
+        required: false
+      UNITYSVC_SELLER_STAGING_API_URL:
+        required: false
+      UNITYSVC_SELLER_PRODUCTION_API_KEY:
+        required: false
+      UNITYSVC_SELLER_PRODUCTION_API_URL:
+        required: false
+      UNITYSVC_API_KEY:
+        required: false
+      UNITYSVC_API_URL:
+        required: false
+    outputs:
+      passed:
+        description: Number of services that passed fully green
+        value: ${{ jobs.smoke.outputs.passed }}
+      total:
+        description: Total number of services tested
+        value: ${{ jobs.smoke.outputs.total }}
+
+concurrency:
+  # run-tests --force mutates persisted test results; never run two at once
+  # against the same environment.
+  group: gateway-smoke-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    # No SSH, no deploy-host access needed — the smoke test only talks to
+    # the public gateway/backend API over HTTPS. Runs on the org's
+    # self-hosted runner (matching deploy-staging.yml's convention) rather
+    # than a GH-hosted one.
+    runs-on: self-hosted
+    timeout-minutes: 45
+    outputs:
+      passed: ${{ steps.smoke.outputs.passed }}
+      total: ${{ steps.smoke.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Python here installs the CLI (usvc/usvc_seller are Python tools) —
+      # the smoke-test orchestration itself is a plain bash script, see
+      # gateway_smoke.sh. >=0.3.6 is required for `run-tests --category`
+      # (unitysvc#2061 / unitysvc-sellers#199): filtering to just the
+      # connectivity-test document server-side, no document-id lookup.
+      - name: Install unitysvc-sellers
+        run: pip install "unitysvc-sellers>=0.3.6"
+
+      - name: Select environment
+        id: env
+        env:
+          TARGET: ${{ inputs.environment }}
+          STAGING_KEY: ${{ secrets.UNITYSVC_SELLER_STAGING_API_KEY }}
+          STAGING_URL: ${{ secrets.UNITYSVC_SELLER_STAGING_API_URL }}
+          PRODUCTION_KEY: ${{ secrets.UNITYSVC_SELLER_PRODUCTION_API_KEY }}
+          PRODUCTION_URL: ${{ secrets.UNITYSVC_SELLER_PRODUCTION_API_URL }}
+          LABS_KEY: ${{ secrets.UNITYSVC_API_KEY }}
+          LABS_URL: ${{ secrets.UNITYSVC_API_URL }}
+        run: |
+          set -euo pipefail
+          if [ "$TARGET" = "prod" ] || [ "$TARGET" = "production" ]; then
+            key="$PRODUCTION_KEY"; url="$PRODUCTION_URL"
+            secret_prefix="UNITYSVC_SELLER_PRODUCTION"
+          else
+            key="$STAGING_KEY"; url="$STAGING_URL"
+            secret_prefix="UNITYSVC_SELLER_STAGING"
+          fi
+          if [ -z "$key" ] || [ -z "$url" ]; then
+            echo "::error::${secret_prefix}_API_KEY/URL are not set." \
+                 "Grant the org secrets to the calling workflow (secrets: inherit, or pass explicitly)."
+            exit 1
+          fi
+          {
+            echo "UNITYSVC_SELLER_API_KEY=$key"
+            echo "UNITYSVC_SELLER_API_URL=$url"
+          } >> "$GITHUB_ENV"
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+          # One labs-customer credential pair covers both environments (same
+          # account, just calling a different backend) — no per-env split.
+          echo "labs_key_set=$([ -n "$LABS_KEY" ] && [ -n "$LABS_URL" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          if [ -n "$LABS_KEY" ]; then
+            echo "::add-mask::$LABS_KEY"
+            echo "LABS_API_KEY=$LABS_KEY" >> "$GITHUB_ENV"
+            echo "LABS_API_URL=$LABS_URL" >> "$GITHUB_ENV"
+          fi
+
+      - name: Run gateway smoke test against ${{ steps.env.outputs.target }}
+        id: smoke
+        # The dispatch inputs go through the environment, never through ${{ }}
+        # interpolation into the shell — a service list is attacker-shaped
+        # input even when only repo writers can trigger this.
+        env:
+          SMOKE_SERVICES: ${{ inputs.services }}
+          FAIL_ON_UPSTREAM_FAULT: ${{ inputs.fail_on_upstream_fault }}
+        run: bash .github/scripts/gateway_smoke.sh
+
+      - name: Notify labs customer of completion (msg-to-mailbox)
+        if: always() && inputs.notify && steps.env.outputs.labs_key_set == 'true'
+        env:
+          SMOKE_PASSED: ${{ steps.smoke.outputs.passed }}
+          SMOKE_TOTAL: ${{ steps.smoke.outputs.total }}
+          SMOKE_BROKEN: ${{ steps.smoke.outputs.broken }}
+          SMOKE_CONCLUSION: ${{ steps.smoke.conclusion }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$SMOKE_CONCLUSION" = "success" ]; then
+            title="Gateway smoke test passed (${{ inputs.environment }}): ${SMOKE_PASSED}/${SMOKE_TOTAL}"
+            msg_type="info"
+          else
+            title="Gateway smoke test FAILED (${{ inputs.environment }}): ${SMOKE_PASSED}/${SMOKE_TOTAL} — ${SMOKE_BROKEN}"
+            msg_type="error"
+          fi
+          payload=$(jq -n --arg title "$title" --arg body "Run: ${RUN_URL}" --arg type "$msg_type" \
+            '{title: $title, body: $body, type: $type, format: "text"}')
+          # msg-to-mailbox delivers to the CALLER's own verified primary
+          # email — this must run as a real labs customer identity, never
+          # ops_customer (ops_customer has no usable inbox by design) and
+          # never the seller key (seller and customer are different roles).
+          # LABS_API_URL is the customer-role gateway base for this account
+          # (set in the "Select environment" step) — not the seller URL.
+          curl --fail-with-body -sS --max-time 15 \
+            -H "Authorization: Bearer ${LABS_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -X POST "${LABS_API_URL%/}/msg-to-mailbox" \
+            --data "$payload" || echo "::warning::completion notification failed (non-fatal)"
+        continue-on-error: true

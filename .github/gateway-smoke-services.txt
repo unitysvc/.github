@@ -1,0 +1,73 @@
+# Services the gateway smoke test exercises, one service_name per line.
+#
+# Each line runs ONLY that service's "Connectivity test" document (not its
+# code examples or anything else) via `usvc seller services run-tests
+# --document-id <connectivity-doc-id> --include-active --force`. Keep this
+# list short: each entry is chosen because it is the cheapest way to prove a
+# DISTINCT gateway code path or cross-system integration actually works, not
+# because the service itself is important.
+#
+# ── API gateway: LLM passthrough code paths (relocated from
+#    apisix-gateways#23 — see unitysvc/.github#<TBD> for the move) ──
+
+# Plain OpenAI -> OpenAI passthrough with an UNCOMPRESSED event stream. The
+# control: if this breaks, something very general broke.
+openai/gpt-4.1-nano
+
+# openai -> anthropic translation, including the streaming path
+# apisix-gateways#20 (stream_options must never reach an Anthropic upstream)
+# and #21 (incremental inflate on the translate path) fixed.
+anthropic/claude-opus-4-8
+
+# Passthrough with a COMPRESSED event stream — nebius gzips its SSE. The
+# canary for apisix-gateways#22: before that fix the plain-text scanners
+# silently no-opped here, leaking the injected usage frame to the client and
+# billing the stream at zero.
+nebius/Qwen/Qwen3-32B
+
+# Cohere's own request format plus the translate route's upstream_path
+# override (its OpenAI-compatible chat lives at /compatibility/v1, not /v1).
+cohere/command-r7b-arabic-02-2025
+
+# SigV4 request signing via resty.aws, the one upstream auth scheme that is
+# not a bearer token.
+bedrock/zai.glm-5
+
+# ── API gateway: HTTP relay + cross-system integration (Redis, Celery) ──
+# Motivated by the msg-to-mailbox incident (2026-09): a production redeploy
+# left routing silently broken and nothing caught it until a human happened
+# to test the one broken service by hand.
+
+# API gateway -> HTTP relay -> platform sink, verifiable by polling the sink's
+# own /retrieve API for the forwarded request (not just a 2xx from the
+# gateway). Private, smoke-test-only service (unitysvc-services-http).
+http-to-sink
+
+# ── SMTP gateway: outbound SMTP relay and HTTP bridge ──
+# Confirms the Haraka SMTP gateway is up, authenticates, and can dispatch —
+# also exercises Redis (route/customer-context lookups) and Celery (every
+# run-tests diagnostic dispatches via run_service_diagnostic).
+
+# SMTP gateway -> SMTP relay -> platform mailpit sink.
+smtp-relay
+
+# SMTP gateway -> HTTP bridge -> platform sink, verifiable via sink's
+# /retrieve API (smtp-to-msg's code example already does this; the
+# connectivity test itself only proves the SMTP greeting).
+smtp-to-http
+
+# ── S3 gateway ──
+
+# S3 gateway proxy of platform-owned content.
+s3-proxy
+
+# ── NOT included yet: SMTP gateway -> API gateway cross-gateway hop ──
+# smtp-to-apisix-gateway exists (unitysvc-services-smtp) and its
+# connectivity test proves this specific path end to end, but it is
+# currently failing intermittently on staging with a transport-level error
+# consistent with a hairpin-NAT/same-host loopback issue between the SMTP
+# gateway container and the API gateway's public endpoint — see the
+# 2026-09-06 investigation notes. Not yet known whether this reproduces on
+# production's real k8s topology (staging's SMTP gateway looks like a
+# lightweight single-host sandbox, not a production-shaped deployment).
+# Add it back here once that's resolved one way or the other.
