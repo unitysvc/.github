@@ -135,8 +135,13 @@ test_service() {
         platform_lines="$(grep '✗' <<<"$out" | grep 'platform_fault' || true)"
         upstream_lines="$(grep '✗' <<<"$out" | grep 'upstream_fault' || true)"
         # Neither label: the CLI itself failed (auth, timeout, bad id) — not
-        # an upstream problem, so treat it as ours to look at.
-        other_lines="$(grep '✗' <<<"$out" | grep -v 'platform_fault' | grep -v 'upstream_fault' || true)"
+        # an upstream problem, so treat it as ours to look at. Every failure
+        # (regardless of its real classification) also prints a generic
+        # trailing "✗ Failed: N/M (see ... show-test ...)" summary with no
+        # fault label at all — exclude that specific shape, or every
+        # upstream_fault gets wrongly escalated to platform_fault just
+        # because that harmless summary line is always present alongside it.
+        other_lines="$(grep '✗' <<<"$out" | grep -v 'platform_fault' | grep -v 'upstream_fault' | grep -v 'show-test' || true)"
         [ -n "$other_lines" ] && platform_lines="$(printf '%s\n%s' "$platform_lines" "$other_lines" | sed '/^$/d')"
         detail="$(grep 'Success:' <<<"$out" | head -1)"
         [ -z "$detail" ] && detail="$(tail -c 300 <<<"$out")"
