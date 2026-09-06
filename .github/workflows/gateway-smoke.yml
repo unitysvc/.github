@@ -195,7 +195,10 @@ jobs:
           # never the seller key (seller and customer are different roles).
           # LABS_API_URL is the customer-role gateway base for this account
           # (set in the "Select environment" step) — not the seller URL.
-          curl --fail-with-body -sS --max-time 15 \
+          # Not sensitive (it's a URL, not a credential) — logged verbatim
+          # to debug the persistent 521 on this call.
+          echo "Notifying via: ${LABS_API_URL%/}/msg-to-mailbox"
+          curl --fail-with-body -sS --max-time 15 -v \
             -H "Authorization: Bearer ${LABS_API_KEY}" \
             -H "Content-Type: application/json" \
             -X POST "${LABS_API_URL%/}/msg-to-mailbox" \
