@@ -1,0 +1,177 @@
+name: Gateway smoke test
+
+# Reusable (workflow_call) post-deploy smoke test: runs the real published
+# "Connectivity test" document of a handful of representative services
+# against a deployed gateway, over the same network path customers use.
+#
+# Motivated by a production incident (2026-09): a redeploy left the gateway
+# silently unroutable for several services, and nothing caught it until a
+# human happened to test the one broken service by hand. The Lua/unit test
+# suites prove a stage behaves correctly in isolation; they cannot catch "this
+# stage is inactive on the route that needed it" or "the deploy broke a whole
+# subsystem" — only a real end-to-end call through the live gateway can.
+#
+# This is a reusable workflow, not a standalone one: it has no `on:` trigger
+# of its own besides `workflow_call`. Callers:
+#   - unitysvc's own deploy-production.yml can `uses:` this directly as a job.
+#   - unitysvc-k8s's deploy.sh is a shell script, not a GitHub Actions job, so
+#     it cannot `uses:` a reusable workflow directly — it needs a thin
+#     workflow_dispatch wrapper workflow in unitysvc-k8s that itself `uses:`
+#     this, triggered via `gh workflow run`.
+#   - unitysvc-staging can call this the same way, pointed at `environment:
+#     staging`, on its own schedule or post-deploy hook.
+#
+# Requires the caller to pass (or `secrets: inherit`) the org secrets
+# UNITYSVC_SELLER_{STAGING,PROD}_API_{KEY,URL} and, for the final completion
+# notification, UNITYSVC_LABS_{STAGING,PROD}_API_KEY (a labs CUSTOMER key —
+# msg-to-mailbox delivers only to the caller's own verified primary email, so
+# the notification must run as a real customer identity, not ops_customer).
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: Which gateway to test
+        type: string
+        default: staging
+      services:
+        description: >-
+          Comma-separated service names to override the default set in
+          .github/gateway-smoke-services.txt
+        type: string
+        required: false
+        default: ""
+      fail_on_upstream_fault:
+        description: Also fail the build when only the provider/receiver misbehaved
+        type: boolean
+        default: false
+      notify:
+        description: Send a completion notification via msg-to-mailbox as the labs customer
+        type: boolean
+        default: true
+    secrets:
+      UNITYSVC_SELLER_STAGING_API_KEY:
+        required: false
+      UNITYSVC_SELLER_STAGING_API_URL:
+        required: false
+      UNITYSVC_SELLER_PROD_API_KEY:
+        required: false
+      UNITYSVC_SELLER_PROD_API_URL:
+        required: false
+      UNITYSVC_LABS_STAGING_API_KEY:
+        required: false
+      UNITYSVC_LABS_PROD_API_KEY:
+        required: false
+    outputs:
+      passed:
+        description: Number of services that passed fully green
+        value: ${{ jobs.smoke.outputs.passed }}
+      total:
+        description: Total number of services tested
+        value: ${{ jobs.smoke.outputs.total }}
+
+concurrency:
+  # run-tests --force mutates persisted test results; never run two at once
+  # against the same environment.
+  group: gateway-smoke-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      passed: ${{ steps.smoke.outputs.passed }}
+      total: ${{ steps.smoke.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install unitysvc-sellers
+        run: pip install "unitysvc-sellers>=0.2.36"
+
+      - name: Select environment
+        id: env
+        env:
+          TARGET: ${{ inputs.environment }}
+          STAGING_KEY: ${{ secrets.UNITYSVC_SELLER_STAGING_API_KEY }}
+          STAGING_URL: ${{ secrets.UNITYSVC_SELLER_STAGING_API_URL }}
+          PROD_KEY: ${{ secrets.UNITYSVC_SELLER_PROD_API_KEY }}
+          PROD_URL: ${{ secrets.UNITYSVC_SELLER_PROD_API_URL }}
+          STAGING_LABS_KEY: ${{ secrets.UNITYSVC_LABS_STAGING_API_KEY }}
+          PROD_LABS_KEY: ${{ secrets.UNITYSVC_LABS_PROD_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ "$TARGET" = "prod" ]; then
+            key="$PROD_KEY"; url="$PROD_URL"; labs_key="$PROD_LABS_KEY"
+          else
+            key="$STAGING_KEY"; url="$STAGING_URL"; labs_key="$STAGING_LABS_KEY"
+          fi
+          if [ -z "$key" ] || [ -z "$url" ]; then
+            echo "::error::UNITYSVC_SELLER_${TARGET^^}_API_KEY/URL are not set." \
+                 "Grant the org secrets to the calling workflow (secrets: inherit, or pass explicitly)."
+            exit 1
+          fi
+          {
+            echo "UNITYSVC_SELLER_API_KEY=$key"
+            echo "UNITYSVC_SELLER_API_URL=$url"
+          } >> "$GITHUB_ENV"
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "labs_key_set=$([ -n "$labs_key" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          if [ -n "$labs_key" ]; then
+            echo "::add-mask::$labs_key"
+            echo "LABS_API_KEY=$labs_key" >> "$GITHUB_ENV"
+          fi
+          gw_url="https://api.svcpass.com"
+          [ "$TARGET" != "prod" ] && gw_url="https://api.staging.svcpass.com"
+          echo "GATEWAY_BASE_URL=$gw_url" >> "$GITHUB_ENV"
+
+      - name: Run gateway smoke test against ${{ steps.env.outputs.target }}
+        id: smoke
+        # The dispatch inputs go through the environment, never through ${{ }}
+        # interpolation into the shell — a service list is attacker-shaped
+        # input even when only repo writers can trigger this.
+        env:
+          SMOKE_SERVICES: ${{ inputs.services }}
+          SMOKE_FAIL_UPSTREAM: ${{ inputs.fail_on_upstream_fault }}
+        run: |
+          set -euo pipefail
+          if [ "${SMOKE_FAIL_UPSTREAM:-false}" = "true" ]; then
+            python .github/scripts/gateway_smoke.py \
+              --services "${SMOKE_SERVICES:-}" --fail-on-upstream-fault
+          else
+            python .github/scripts/gateway_smoke.py \
+              --services "${SMOKE_SERVICES:-}"
+          fi
+
+      - name: Notify labs customer of completion (msg-to-mailbox)
+        if: always() && inputs.notify && steps.env.outputs.labs_key_set == 'true'
+        env:
+          SMOKE_PASSED: ${{ steps.smoke.outputs.passed }}
+          SMOKE_TOTAL: ${{ steps.smoke.outputs.total }}
+          SMOKE_BROKEN: ${{ steps.smoke.outputs.broken }}
+          SMOKE_CONCLUSION: ${{ steps.smoke.conclusion }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ "$SMOKE_CONCLUSION" = "success" ]; then
+            title="Gateway smoke test passed (${{ inputs.environment }}): ${SMOKE_PASSED}/${SMOKE_TOTAL}"
+            msg_type="info"
+          else
+            title="Gateway smoke test FAILED (${{ inputs.environment }}): ${SMOKE_PASSED}/${SMOKE_TOTAL} — ${SMOKE_BROKEN}"
+            msg_type="error"
+          fi
+          payload=$(jq -n --arg title "$title" --arg body "Run: ${RUN_URL}" --arg type "$msg_type" \
+            '{title: $title, body: $body, type: $type, format: "text"}')
+          # msg-to-mailbox delivers to the CALLER's own verified primary
+          # email — this must run as a real labs customer identity, never
+          # ops_customer (ops_customer has no usable inbox by design).
+          curl --fail-with-body -sS --max-time 15 \
+            -H "Authorization: Bearer ${LABS_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -X POST "${GATEWAY_BASE_URL}/msg-to-mailbox" \
+            --data "$payload" || echo "::warning::completion notification failed (non-fatal)"
+        continue-on-error: true
