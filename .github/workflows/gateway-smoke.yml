@@ -78,7 +78,11 @@ concurrency:
 
 jobs:
   smoke:
-    runs-on: ubuntu-latest
+    # No SSH, no deploy-host access needed — the smoke test only talks to
+    # the public gateway/backend API over HTTPS. Runs on the org's
+    # self-hosted runner (matching deploy-staging.yml's convention) rather
+    # than a GH-hosted one.
+    runs-on: self-hosted
     timeout-minutes: 45
     outputs:
       passed: ${{ steps.smoke.outputs.passed }}
