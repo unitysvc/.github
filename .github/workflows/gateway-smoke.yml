@@ -140,6 +140,12 @@ jobs:
                  "Grant the org secrets to the calling workflow (secrets: inherit, or pass explicitly)."
             exit 1
           fi
+          # These org secrets are stored as bare hostnames (e.g.
+          # "api.svcpass.com", no scheme) — add https:// if missing so
+          # everything downstream can treat them as full URLs uniformly.
+          # Idempotent: a value that already has a scheme passes through.
+          add_scheme() { case "$1" in https://*|http://*) echo "$1" ;; *) echo "https://$1" ;; esac; }
+          url="$(add_scheme "$url")"
           {
             echo "UNITYSVC_SELLER_API_KEY=$key"
             echo "UNITYSVC_SELLER_API_URL=$url"
@@ -151,7 +157,7 @@ jobs:
           if [ -n "$LABS_KEY" ]; then
             echo "::add-mask::$LABS_KEY"
             echo "LABS_API_KEY=$LABS_KEY" >> "$GITHUB_ENV"
-            echo "LABS_API_URL=$LABS_URL" >> "$GITHUB_ENV"
+            echo "LABS_API_URL=$(add_scheme "$LABS_URL")" >> "$GITHUB_ENV"
           fi
 
       - name: Run gateway smoke test against ${{ steps.env.outputs.target }}
