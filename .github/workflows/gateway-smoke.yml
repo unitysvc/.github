@@ -90,8 +90,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Python here installs the CLI (usvc/usvc_seller are Python tools) —
+      # the smoke-test orchestration itself is a plain bash script, see
+      # gateway_smoke.sh. >=0.3.6 is required for `run-tests --category`
+      # (unitysvc#2061 / unitysvc-sellers#199): filtering to just the
+      # connectivity-test document server-side, no document-id lookup.
       - name: Install unitysvc-sellers
-        run: pip install "unitysvc-sellers>=0.2.36"
+        run: pip install "unitysvc-sellers>=0.3.6"
 
       - name: Select environment
         id: env
@@ -136,16 +141,8 @@ jobs:
         # input even when only repo writers can trigger this.
         env:
           SMOKE_SERVICES: ${{ inputs.services }}
-          SMOKE_FAIL_UPSTREAM: ${{ inputs.fail_on_upstream_fault }}
-        run: |
-          set -euo pipefail
-          if [ "${SMOKE_FAIL_UPSTREAM:-false}" = "true" ]; then
-            python .github/scripts/gateway_smoke.py \
-              --services "${SMOKE_SERVICES:-}" --fail-on-upstream-fault
-          else
-            python .github/scripts/gateway_smoke.py \
-              --services "${SMOKE_SERVICES:-}"
-          fi
+          FAIL_ON_UPSTREAM_FAULT: ${{ inputs.fail_on_upstream_fault }}
+        run: bash .github/scripts/gateway_smoke.sh
 
       - name: Notify labs customer of completion (msg-to-mailbox)
         if: always() && inputs.notify && steps.env.outputs.labs_key_set == 'true'
