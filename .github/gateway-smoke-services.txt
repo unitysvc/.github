@@ -47,18 +47,18 @@ smtp-relay
 # connectivity test itself only proves the SMTP greeting).
 smtp-to-http
 
+# SMTP gateway -> API gateway (http-to-sink) -> platform sink, verifiable
+# via sink's /retrieve API. The one path that proves the SMTP and API
+# gateways can reach each other cross-container, not just each work in
+# isolation. What looked like a hairpin-NAT/loopback flake
+# (2026-09-06 investigation notes) was actually ${API_GATEWAY_BASE_URL}
+# never being substituted in upstream_access_config.base_url — fixed by
+# smtp-gateway#9's render_gateway_macros, using auth_mode: forward instead
+# of api_key: __forward__ (unitysvc-services-smtp#33) so base_url can stay
+# the portable macro instead of a hardcoded literal.
+smtp-to-apisix-gateway
+
 # ── S3 gateway ──
 
 # S3 gateway proxy of platform-owned content.
 s3-proxy
-
-# ── NOT included yet: SMTP gateway -> API gateway cross-gateway hop ──
-# smtp-to-apisix-gateway exists (unitysvc-services-smtp) and its
-# connectivity test proves this specific path end to end, but it is
-# currently failing intermittently on staging with a transport-level error
-# consistent with a hairpin-NAT/same-host loopback issue between the SMTP
-# gateway container and the API gateway's public endpoint — see the
-# 2026-09-06 investigation notes. Not yet known whether this reproduces on
-# production's real k8s topology (staging's SMTP gateway looks like a
-# lightweight single-host sandbox, not a production-shaped deployment).
-# Add it back here once that's resolved one way or the other.
