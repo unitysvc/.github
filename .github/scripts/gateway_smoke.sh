@@ -68,10 +68,17 @@ fi
 # `json.loads(..., strict=False)` + re-dump to hand jq something it can
 # actually parse; every subsequent step is plain bash + jq.
 # ---------------------------------------------------------------------------
-CATALOG_RAW="$(usvc seller services list --all -f json)" || {
-    echo "::error::could not list services"
+catalog_stderr="$(mktemp)"
+CATALOG_RAW="$(usvc seller services list --all -f json 2>"$catalog_stderr")"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "::error::could not list services (exit $rc):"
+    cat "$catalog_stderr"
+    echo "$CATALOG_RAW"
+    rm -f "$catalog_stderr"
     exit 1
-}
+fi
+rm -f "$catalog_stderr"
 CATALOG="$(python3 -c '
 import json, sys
 raw = sys.stdin.read()
@@ -80,7 +87,8 @@ if end == -1:
     sys.exit("::error::unexpected list output: " + raw[:400])
 json.dump(json.loads(raw[: end + 1], strict=False), sys.stdout)
 ' <<<"$CATALOG_RAW")" || {
-    echo "::error::could not parse service catalog JSON"
+    echo "::error::could not parse service catalog JSON — raw output was:"
+    echo "$CATALOG_RAW"
     exit 1
 }
 
