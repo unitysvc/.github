@@ -12,20 +12,27 @@ name: Gateway smoke test
 # subsystem" — only a real end-to-end call through the live gateway can.
 #
 # This is a reusable workflow, not a standalone one: it has no `on:` trigger
-# of its own besides `workflow_call`. Callers:
-#   - unitysvc's own deploy-production.yml can `uses:` this directly as a job.
-#   - unitysvc-k8s's deploy.sh is a shell script, not a GitHub Actions job, so
-#     it cannot `uses:` a reusable workflow directly — it needs a thin
-#     workflow_dispatch wrapper workflow in unitysvc-k8s that itself `uses:`
-#     this, triggered via `gh workflow run`.
-#   - unitysvc-staging can call this the same way, pointed at `environment:
-#     staging`, on its own schedule or post-deploy hook.
+# of its own besides `workflow_call`. Callers `uses:` this as a job (needing
+# a deploy job to finish first: `needs: deploy`) with `secrets: inherit`:
+#   - unitysvc's deploy-production.yml (environment: prod) and
+#     deploy-staging.yml (environment: staging) — every deploy, both envs.
+#   - unitysvc-k8s's deploy-app.yml (environment: prod) — chart-only
+#     production deploys that bypass the app-image-gated unitysvc flow.
+#   - unitysvc-staging's own gateway-smoke.yml (environment: staging,
+#     hardcoded) — this repo has no GitHub-Actions-driven deploy of its own
+#     (update-staging.sh runs over SSH from unitysvc's deploy-staging.yml),
+#     so it's workflow_dispatch + a daily schedule instead of a deploy hook.
 #
 # Requires the caller to pass (or `secrets: inherit`) the org secrets
-# UNITYSVC_SELLER_{STAGING,PROD}_API_{KEY,URL} and, for the final completion
-# notification, UNITYSVC_LABS_{STAGING,PROD}_API_KEY (a labs CUSTOMER key —
-# msg-to-mailbox delivers only to the caller's own verified primary email, so
-# the notification must run as a real customer identity, not ops_customer).
+# UNITYSVC_SELLER_{STAGING,PRODUCTION}_API_{KEY,URL} (seller role — what
+# `usvc seller services run-tests` itself authenticates as) and, for the
+# final completion notification, UNITYSVC_API_KEY / UNITYSVC_API_URL (the
+# labs CUSTOMER credential — msg-to-mailbox delivers only to the caller's
+# own verified primary email, which requires a real customer identity, not
+# ops_customer and not the seller key: seller and customer are different
+# roles, and msg-to-mailbox is a customer-facing consumption route). One
+# customer credential pair covers both environments — it's the same labs
+# account either way.
 
 on:
   workflow_call:
@@ -54,13 +61,13 @@ on:
         required: false
       UNITYSVC_SELLER_STAGING_API_URL:
         required: false
-      UNITYSVC_SELLER_PROD_API_KEY:
+      UNITYSVC_SELLER_PRODUCTION_API_KEY:
         required: false
-      UNITYSVC_SELLER_PROD_API_URL:
+      UNITYSVC_SELLER_PRODUCTION_API_URL:
         required: false
-      UNITYSVC_LABS_STAGING_API_KEY:
+      UNITYSVC_API_KEY:
         required: false
-      UNITYSVC_LABS_PROD_API_KEY:
+      UNITYSVC_API_URL:
         required: false
     outputs:
       passed:
@@ -108,19 +115,21 @@ jobs:
           TARGET: ${{ inputs.environment }}
           STAGING_KEY: ${{ secrets.UNITYSVC_SELLER_STAGING_API_KEY }}
           STAGING_URL: ${{ secrets.UNITYSVC_SELLER_STAGING_API_URL }}
-          PROD_KEY: ${{ secrets.UNITYSVC_SELLER_PROD_API_KEY }}
-          PROD_URL: ${{ secrets.UNITYSVC_SELLER_PROD_API_URL }}
-          STAGING_LABS_KEY: ${{ secrets.UNITYSVC_LABS_STAGING_API_KEY }}
-          PROD_LABS_KEY: ${{ secrets.UNITYSVC_LABS_PROD_API_KEY }}
+          PRODUCTION_KEY: ${{ secrets.UNITYSVC_SELLER_PRODUCTION_API_KEY }}
+          PRODUCTION_URL: ${{ secrets.UNITYSVC_SELLER_PRODUCTION_API_URL }}
+          LABS_KEY: ${{ secrets.UNITYSVC_API_KEY }}
+          LABS_URL: ${{ secrets.UNITYSVC_API_URL }}
         run: |
           set -euo pipefail
-          if [ "$TARGET" = "prod" ]; then
-            key="$PROD_KEY"; url="$PROD_URL"; labs_key="$PROD_LABS_KEY"
+          if [ "$TARGET" = "prod" ] || [ "$TARGET" = "production" ]; then
+            key="$PRODUCTION_KEY"; url="$PRODUCTION_URL"
+            secret_prefix="UNITYSVC_SELLER_PRODUCTION"
           else
-            key="$STAGING_KEY"; url="$STAGING_URL"; labs_key="$STAGING_LABS_KEY"
+            key="$STAGING_KEY"; url="$STAGING_URL"
+            secret_prefix="UNITYSVC_SELLER_STAGING"
           fi
           if [ -z "$key" ] || [ -z "$url" ]; then
-            echo "::error::UNITYSVC_SELLER_${TARGET^^}_API_KEY/URL are not set." \
+            echo "::error::${secret_prefix}_API_KEY/URL are not set." \
                  "Grant the org secrets to the calling workflow (secrets: inherit, or pass explicitly)."
             exit 1
           fi
@@ -129,14 +138,14 @@ jobs:
             echo "UNITYSVC_SELLER_API_URL=$url"
           } >> "$GITHUB_ENV"
           echo "target=$TARGET" >> "$GITHUB_OUTPUT"
-          echo "labs_key_set=$([ -n "$labs_key" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          if [ -n "$labs_key" ]; then
-            echo "::add-mask::$labs_key"
-            echo "LABS_API_KEY=$labs_key" >> "$GITHUB_ENV"
+          # One labs-customer credential pair covers both environments (same
+          # account, just calling a different backend) — no per-env split.
+          echo "labs_key_set=$([ -n "$LABS_KEY" ] && [ -n "$LABS_URL" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          if [ -n "$LABS_KEY" ]; then
+            echo "::add-mask::$LABS_KEY"
+            echo "LABS_API_KEY=$LABS_KEY" >> "$GITHUB_ENV"
+            echo "LABS_API_URL=$LABS_URL" >> "$GITHUB_ENV"
           fi
-          gw_url="https://api.svcpass.com"
-          [ "$TARGET" != "prod" ] && gw_url="https://api.staging.svcpass.com"
-          echo "GATEWAY_BASE_URL=$gw_url" >> "$GITHUB_ENV"
 
       - name: Run gateway smoke test against ${{ steps.env.outputs.target }}
         id: smoke
@@ -169,10 +178,13 @@ jobs:
             '{title: $title, body: $body, type: $type, format: "text"}')
           # msg-to-mailbox delivers to the CALLER's own verified primary
           # email — this must run as a real labs customer identity, never
-          # ops_customer (ops_customer has no usable inbox by design).
+          # ops_customer (ops_customer has no usable inbox by design) and
+          # never the seller key (seller and customer are different roles).
+          # LABS_API_URL is the customer-role gateway base for this account
+          # (set in the "Select environment" step) — not the seller URL.
           curl --fail-with-body -sS --max-time 15 \
             -H "Authorization: Bearer ${LABS_API_KEY}" \
             -H "Content-Type: application/json" \
-            -X POST "${GATEWAY_BASE_URL}/msg-to-mailbox" \
+            -X POST "${LABS_API_URL%/}/msg-to-mailbox" \
             --data "$payload" || echo "::warning::completion notification failed (non-fatal)"
         continue-on-error: true
