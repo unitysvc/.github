@@ -95,7 +95,14 @@ jobs:
       passed: ${{ steps.smoke.outputs.passed }}
       total: ${{ steps.smoke.outputs.total }}
     steps:
+      # actions/checkout defaults to the CALLING repo (unitysvc-staging,
+      # unitysvc-k8s, ...), not the repo hosting this reusable workflow —
+      # gateway_smoke.sh and gateway-smoke-services.txt live in
+      # unitysvc/.github, so pin both explicitly regardless of caller.
       - uses: actions/checkout@v4
+        with:
+          repository: unitysvc/.github
+          ref: main
 
       - uses: actions/setup-python@v5
         with:
