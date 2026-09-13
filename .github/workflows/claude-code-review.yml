@@ -94,6 +94,24 @@ jobs:
           # comment under the action's control instead of the model's.
           track_progress: ${{ github.event_name == 'pull_request' }}
           prompt: '/code-review:code-review ${{ github.repository }}#${{ inputs.pr }}'
+          # Subagents are denied, not merely left off the allowlist. The command
+          # instructs its step 4 to "launch 5 parallel agents"; the main agent
+          # backgrounds them, and a headless session has no way to await
+          # background work — it spends turns on ScheduleWakeup, which does
+          # nothing here, and then reports `reviewed: false` having reviewed
+          # nothing. Across every run observed, the split is total: the two that
+          # produced a review spawned zero subagents, and all four that spawned
+          # them (2-8 each, most backgrounded, always fewer completed than
+          # spawned) abandoned the review. See unitysvc/unitysvc#2241.
+          #
+          # Denied rather than un-allowed because `Agent` and `ScheduleWakeup`
+          # were both used on run 34776014114 without ever appearing in
+          # --allowedTools: that list gates prompting, not availability.
+          #
+          # The system prompt is here so the model adapts deliberately instead
+          # of discovering the denial mid-plan. It goes in claude_args, never in
+          # `prompt:` — the slash command there is brittle enough already.
+          #
           # Skill first: without it the slash command in `prompt` is denied and
           # never runs at all — Claude improvises a review from the prompt text
           # instead. Task next, because the command delegates every one of its
@@ -118,8 +136,10 @@ jobs:
           # by slicing the string -- slicing happily returns the whole schema
           # while the shell has already torn it in half.
           claude_args: >-
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,mcp__github__get_pull_request,mcp__github__get_pull_request_files,mcp__github__get_pull_request_diff,mcp__github__get_pull_request_comments,mcp__github__get_pull_request_reviews,mcp__github__list_pull_requests,mcp__github__search_pull_requests,Skill,Task,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh pr comment:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*),Bash(git diff:*),Bash(git fetch:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,mcp__github__get_pull_request,mcp__github__get_pull_request_files,mcp__github__get_pull_request_diff,mcp__github__get_pull_request_comments,mcp__github__get_pull_request_reviews,mcp__github__list_pull_requests,mcp__github__search_pull_requests,Skill,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh pr comment:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*),Bash(git diff:*),Bash(git fetch:*)"
             --json-schema '{"type":"object","properties":{"reviewed":{"type":"boolean","description":"True only if you actually performed the code review: you read the changes in this pull request, ran the review over them, and posted your review comment. False if you stopped early for any reason at all -- the pull request was ineligible (closed, draft, trivial, already reviewed by you), a tool error or permission block kept you from reading the diff or the PR metadata, or you simply never got as far as posting a review comment. Never report a review you did not perform. When in doubt, false is always the correct answer: it is recorded as a run where no review happened, it is never held against the pull request, and it is far better than a review that silently did not run being read as a clean one.","default":false},"has_blocker":{"type":"boolean","description":"True if any issue in the review you just produced is a blocker. A blocker is a defect this pull request introduces that would be wrong to merge as-is: incorrect behaviour or a wrong result, data loss or corruption, a security or authorization hole, a breaking API/schema/migration change, or an explicit violation of a rule stated in a CLAUDE.md file. Judge severity here, not confidence -- you already dropped the findings you were not confident in. Lean towards true: when a reported issue is borderline, call it a blocker. A human can force-merge past a wrong failure, but a blocker that passes silently ships. False when you reported no issues at all, or only nitpicks, style points, optional suggestions, praise, or pre-existing problems this PR did not introduce. Meaningless unless reviewed is true.","default":false},"blockers":{"type":"array","description":"One entry per blocking issue, in the same order as the review comment. Empty when has_blocker is false.","items":{"type":"object","properties":{"file":{"type":"string","description":"Repo-relative path of the blocking issue, with a :line or :start-end suffix when known."},"summary":{"type":"string","description":"One sentence naming the defect and why merging it as-is would be wrong."}},"required":["file","summary"]}},"review_markdown":{"type":"string","description":"The full markdown body of the review you posted. On a manually dispatched run there is no comment for you to post into, and posting will not have been possible -- put the complete review here in that case and the workflow posts it to the pull request on your behalf. Empty string when no review happened.","default":""}},"required":["reviewed","has_blocker","blockers"]}'
+            --disallowedTools "Task,Agent,ScheduleWakeup"
+            --append-system-prompt "You are running headless in CI. Subagents and background work are unavailable to you: the Task, Agent and ScheduleWakeup tools are denied. Carry out every step of the code review yourself, inline, in this session, including any step whose instructions tell you to delegate it to a subagent. Never wait for background work to finish, because nothing will ever finish. Reviewing the change yourself is always better than reporting that no review happened."
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 
