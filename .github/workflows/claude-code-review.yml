@@ -15,9 +15,15 @@ on:
   workflow_call:
     inputs:
       pr:
+        # string, not number: a caller passing `github.event.pull_request.number
+        # || inputs.pr` hands this a string, and a number-typed input rejects it
+        # outright -- "Unexpected value '2208'", raised while evaluating the
+        # caller's inputs, so the run fails with no jobs at all and no log to
+        # read. Nothing here needs it numeric: it only ever lands in a URL path,
+        # the prompt text and an artifact name.
         description: "Pull request number to review."
         required: true
-        type: number
+        type: string
       runs_on:
         description: "Runner label. unitysvc is self-hosted; the gateway repos are ubuntu-latest."
         required: false
@@ -65,11 +71,13 @@ jobs:
           # Full history: the review reads `git blame` / `git log` on the
           # modified files to judge the change in its historical context.
           fetch-depth: 0
-          # A pull_request run already checks out the merge ref. A dispatched
-          # run starts on the default branch and has to be pointed at the PR;
-          # refs/pull/N/merge matches what the PR-event path reviews. It does
-          # not exist while the PR has conflicts — rebase, or push, instead.
-          ref: ${{ github.event_name == 'pull_request' && '' || format('refs/pull/{0}/merge', inputs.pr) }}
+          # Always the merge ref: it is exactly what a pull_request run checks
+          # out by default, and a dispatched run starts on the default branch
+          # and has to be pointed at the PR explicitly. Stated unconditionally
+          # because the `cond && '' || other` form does not do what it looks
+          # like -- '' is falsy, so that expression yields `other` either way.
+          # This ref does not exist while a PR has conflicts; rebase instead.
+          ref: ${{ format('refs/pull/{0}/merge', inputs.pr) }}
 
       - name: Run Claude Code Review
         id: claude-review
