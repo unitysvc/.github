@@ -33,6 +33,12 @@ name: Gateway smoke test
 # and customer are different roles, and msg-to-mailbox is a customer-facing
 # consumption route). Both pairs are per-environment, same shape — staging
 # tests never touch production credentials or vice versa.
+#
+# The workflow seeds smtp-to-api-gateway's smoke-test route into the
+# seller-secret store before running diagnostics so the synthetic ops_customer
+# resolves
+# `${ customer_secrets.SMTP_TO_API_GATEWAY_TARGET }` to the intended smoke route
+# instead of the service default (`notify`).
 
 on:
   workflow_call:
@@ -167,6 +173,22 @@ jobs:
             echo "CUSTOMER_API_KEY=$customer_key" >> "$GITHUB_ENV"
             echo "CUSTOMER_API_URL=$(add_scheme "$customer_url")" >> "$GITHUB_ENV"
           fi
+
+      - name: Seed SMTP-to-API smoke target
+        env:
+          SMTP_TO_API_GATEWAY_TARGET: http-to-sink
+          SMTP_TO_API_GATEWAY_FORMAT: apprise
+        run: |
+          set -euo pipefail
+
+          usvc seller secrets set SMTP_TO_API_GATEWAY_TARGET \
+            --variable \
+            --value "$SMTP_TO_API_GATEWAY_TARGET" \
+            --description "Route used by gateway smoke tests for smtp-to-api-gateway."
+          usvc seller secrets set SMTP_TO_API_GATEWAY_FORMAT \
+            --variable \
+            --value "${SMTP_TO_API_GATEWAY_FORMAT:-apprise}" \
+            --description "Payload format used by gateway smoke tests for smtp-to-api-gateway."
 
       - name: Run gateway smoke test against ${{ steps.env.outputs.target }}
         id: smoke

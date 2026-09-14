@@ -47,16 +47,17 @@ smtp-relay
 # connectivity test itself only proves the SMTP greeting).
 smtp-to-http
 
-# SMTP gateway -> API gateway (http-to-sink) -> platform sink, verifiable
-# via sink's /retrieve API. The one path that proves the SMTP and API
-# gateways can reach each other cross-container, not just each work in
-# isolation. What looked like a hairpin-NAT/loopback flake
-# (2026-09-06 investigation notes) was actually ${API_GATEWAY_BASE_URL}
-# never being substituted in upstream_access_config.base_url — fixed by
-# smtp-gateway#9's render_gateway_macros, using auth_mode: forward instead
-# of api_key: __forward__ (unitysvc-services-smtp#33) so base_url can stay
-# the portable macro instead of a hardcoded literal.
-smtp-to-apisix-gateway
+# SMTP gateway -> public configurable API gateway bridge -> platform sink,
+# verifiable via the sink's /retrieve API. This proves the same cross-container
+# SMTP-to-API path the old private smtp-to-apisix-gateway smoke service did,
+# but through the service customers actually call; the smoke account supplies
+# target=http-to-sink via SMTP_TO_API_GATEWAY_TARGET. What looked like a
+# hairpin-NAT/loopback flake (2026-09-06 investigation notes) was actually
+# ${API_GATEWAY_BASE_URL} never being substituted in upstream_access_config.base_url
+# — fixed by smtp-gateway#9's render_gateway_macros, using auth_mode: forward
+# instead of api_key: __forward__ (unitysvc-services-smtp#33) so base_url can
+# stay the portable macro instead of a hardcoded literal.
+smtp-to-api-gateway
 
 # ── S3 gateway ──
 
