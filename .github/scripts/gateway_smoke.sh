@@ -39,6 +39,8 @@ SERVICES_FILE="${SERVICES_FILE:-.github/gateway-smoke-services.txt}"
 SMOKE_SERVICES="${SMOKE_SERVICES:-}"
 RETRIES="${RETRIES:-1}"
 FAIL_ON_UPSTREAM_FAULT="${FAIL_ON_UPSTREAM_FAULT:-false}"
+PLATFORM_SERVICE_PATH="${PLATFORM_SERVICE_PATH:-p/llm/chat/completions}"
+PLATFORM_SERVICE_MODEL="${PLATFORM_SERVICE_MODEL:-fast}"
 
 # ---------------------------------------------------------------------------
 # Resolve the service list.
@@ -172,6 +174,52 @@ test_service() {
 }
 
 # ---------------------------------------------------------------------------
+# Exercise the customer-facing platform facade. Seller connectivity tests
+# cover concrete provider services, but they do not prove that the shared
+# /p route can select and dispatch through a platform service.
+# ---------------------------------------------------------------------------
+test_platform_service() {
+    local name="platform:${PLATFORM_SERVICE_PATH} (model=${PLATFORM_SERVICE_MODEL})"
+    local attempt response body status rc detail
+
+    if [ -z "${CUSTOMER_API_KEY:-}" ] || [ -z "${CUSTOMER_API_URL:-}" ]; then
+        detail="CUSTOMER_API_KEY/URL are required for the platform-service smoke test"
+        echo "::error title=Platform service smoke unavailable::${detail}"
+        BROKEN_NAMES+=("$name")
+        SUMMARY_ROWS+=("| \`$name\` | GATEWAY FAULT | 0 |")
+        DETAIL_SECTIONS+=("### \`$name\` — gateway fault"$'\n'$'\n'"\`\`\`"$'\n'"$detail"$'\n'"\`\`\`")
+        return
+    fi
+
+    for attempt in $(seq 1 $((RETRIES + 1))); do
+        response="$(curl --silent --show-error --max-time 60 \
+            -H "Authorization: Bearer ${CUSTOMER_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -X POST "${CUSTOMER_API_URL%/}/${PLATFORM_SERVICE_PATH#/}" \
+            --data "$(jq -cn --arg model "$PLATFORM_SERVICE_MODEL" \
+                '{model: $model, messages: [{role: "user", content: "Reply with OK."}], max_tokens: 8, stream: false}')" \
+            --write-out $'\n%{http_code}')"
+        rc=$?
+        status="${response##*$'\n'}"
+        body="${response%$'\n'*}"
+
+        if [ "$rc" -eq 0 ] && [[ "$status" =~ ^2[0-9][0-9]$ ]] && \
+            jq -e '.choices | type == "array" and length > 0' >/dev/null 2>&1 <<<"$body"; then
+            echo "HTTP ${status}; platform model '${PLATFORM_SERVICE_MODEL}' returned a completion"
+            PASSED_COUNT=$((PASSED_COUNT + 1))
+            SUMMARY_ROWS+=("| \`$name\` | pass | $attempt |")
+            return
+        fi
+    done
+
+    detail="curl_exit=${rc} http_status=${status} response=$(head -c 500 <<<"$body")"
+    echo "::error title=Platform service smoke failed::${detail}"
+    BROKEN_NAMES+=("$name")
+    SUMMARY_ROWS+=("| \`$name\` | GATEWAY FAULT | $attempt |")
+    DETAIL_SECTIONS+=("### \`$name\` — gateway fault"$'\n'$'\n'"\`\`\`"$'\n'"$detail"$'\n'"\`\`\`")
+}
+
+# ---------------------------------------------------------------------------
 # Main loop.
 # ---------------------------------------------------------------------------
 for name in "${NAMES[@]}"; do
@@ -190,10 +238,14 @@ for name in "${NAMES[@]}"; do
     echo "::endgroup::"
 done
 
+echo "::group::Platform service ${PLATFORM_SERVICE_PATH} (model=${PLATFORM_SERVICE_MODEL})"
+test_platform_service
+echo "::endgroup::"
+
 # ---------------------------------------------------------------------------
 # Report.
 # ---------------------------------------------------------------------------
-TOTAL=${#NAMES[@]}
+TOTAL=$((${#NAMES[@]} + 1))
 {
     echo "# Gateway smoke test"
     echo
