@@ -27,12 +27,10 @@ name: Gateway smoke test
 # UNITYSVC_SELLER_{STAGING,PRODUCTION}_API_{KEY,URL} (seller role — what
 # `usvc seller services run-tests` itself authenticates as) and
 # UNITYSVC_CUSTOMER_{STAGING,PRODUCTION}_API_{KEY,URL} for the final
-# completion notification (a labs CUSTOMER credential — msg-to-mailbox
-# delivers only to the caller's own verified primary email, which requires
-# a real customer identity, not ops_customer and not the seller key: seller
-# and customer are different roles, and msg-to-mailbox is a customer-facing
-# consumption route). Both pairs are per-environment, same shape — staging
-# tests never touch production credentials or vice versa.
+# platform-service request and final completion notification (a labs CUSTOMER
+# credential — customer-facing routes require a real customer identity, not
+# ops_customer and not the seller key). Both pairs are per-environment, same
+# shape — staging tests never touch production credentials or vice versa.
 
 on:
   workflow_call:
@@ -153,6 +151,11 @@ jobs:
           if [ -z "$seller_key" ] || [ -z "$seller_url" ]; then
             echo "::error::UNITYSVC_SELLER_${env_prefix}_API_KEY/URL are not set." \
                  "Grant the org secrets to the calling workflow (secrets: inherit, or pass explicitly)."
+            exit 1
+          fi
+          if [ -z "$customer_key" ] || [ -z "$customer_url" ]; then
+            echo "::error::UNITYSVC_CUSTOMER_${env_prefix}_API_KEY/URL are not set." \
+                 "They are required for the platform-service smoke test."
             exit 1
           fi
           {
