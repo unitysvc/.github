@@ -60,44 +60,63 @@ if [ ${#NAMES[@]} -eq 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Load the full catalog once, so names resolve to ids locally. The CLI's
-# JSON output has two quirks jq won't tolerate: (1) a human summary line
-# ("N services displayed — no more items.") after the JSON array, and (2)
-# literal, unescaped control characters (raw newlines) inside string field
-# values. `python3 -c` here isn't orchestration logic — it's a one-line
+# Resolve a service_name to ONE service id.
+#
+# Why an id at all, when `run-tests` accepts a name: given a name, run-tests
+# tests EVERY row that matches it, and a service and its pending/rejected
+# revision share one — a rejected revision would fail the deploy smoke. And a
+# name matching nothing exits 0 ("No services match"), so a renamed service
+# would pass silently. Resolving here picks the live row and makes "not
+# found" a failure.
+#
+# Each name is looked up with the CLI's server-side name filter rather than
+# by listing the seller's whole catalog: `services list --all` grew to
+# minutes on production (Oct 2026) and finally outlived the runner. The
+# filter is a case-insensitive partial match, so the jq below keeps only
+# exact names.
+#
+# The CLI's JSON output has two quirks jq won't tolerate: (1) a human summary
+# line ("N services displayed — no more items.") after the JSON array, and
+# (2) literal, unescaped control characters (raw newlines) inside string
+# field values. `python3 -c` here isn't orchestration logic — it's a one-line
 # `json.loads(..., strict=False)` + re-dump to hand jq something it can
-# actually parse; every subsequent step is plain bash + jq.
+# actually parse.
+#
+# Prints "<id>\t<status>", "NOTFOUND", or "ERROR\t<detail>".
 # ---------------------------------------------------------------------------
-catalog_stderr="$(mktemp)"
-CATALOG_RAW="$(usvc seller services list --all -f json 2>"$catalog_stderr")"
-rc=$?
-if [ "$rc" -ne 0 ]; then
-    echo "::error::could not list services (exit $rc):"
-    cat "$catalog_stderr"
-    echo "$CATALOG_RAW"
-    rm -f "$catalog_stderr"
-    exit 1
-fi
-rm -f "$catalog_stderr"
-CATALOG="$(python3 -c '
+lookup_rows() {
+    local raw rc err
+    err="$(mktemp)"
+    raw="$(usvc seller services list "$1" --all -f json 2>"$err")"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        printf 'ERROR\tcould not list services named %s (exit %s): %s' "$1" "$rc" "$(cat "$err" <(echo "$raw") | tail -c 300)"
+        rm -f "$err"
+        return 1
+    fi
+    rm -f "$err"
+    # No match prints a plain "No services found" line, not a JSON array.
+    case "$raw" in *"No services found"*) echo "[]"; return 0 ;; esac
+    python3 -c '
 import json, sys
 raw = sys.stdin.read()
-end = raw.rfind("]")
-if end == -1:
-    sys.exit("::error::unexpected list output: " + raw[:400])
-json.dump(json.loads(raw[: end + 1], strict=False), sys.stdout)
-' <<<"$CATALOG_RAW")" || {
-    echo "::error::could not parse service catalog JSON — raw output was:"
-    echo "$CATALOG_RAW"
-    exit 1
+start, end = raw.find("["), raw.rfind("]")
+if start == -1 or end == -1:
+    sys.exit("unexpected list output: " + raw[:300])
+json.dump(json.loads(raw[start : end + 1], strict=False), sys.stdout)
+' <<<"$raw" 2>&1 || return 1
 }
 
-# Resolve a service_name to ONE service id. Names are not unique: a service
-# and its pending/rejected revision share one, and which rows exist differs
-# per environment. Prefer the live row (active, then approved) — the point
-# is to test what customers actually hit; otherwise the most recently
-# updated row.
+# Names are not unique: a service and its pending/rejected revision share
+# one, and which rows exist differs per environment. Prefer the live row
+# (active, then approved) — the point is to test what customers actually
+# hit; otherwise the most recently updated row.
 resolve_id() {
+    local rows
+    if ! rows="$(lookup_rows "$1")"; then
+        case "$rows" in ERROR*) echo "$rows" ;; *) printf 'ERROR\t%s' "$rows" ;; esac
+        return 0
+    fi
     jq -r --arg name "$1" '
         [.[] | select(.name == $name)] as $rows
         | if ($rows | length) == 0 then "NOTFOUND"
@@ -111,7 +130,7 @@ resolve_id() {
               end
           )
         end
-    ' <<<"$CATALOG"
+    ' <<<"$rows"
 }
 
 # ---------------------------------------------------------------------------
@@ -178,6 +197,13 @@ for name in "${NAMES[@]}"; do
     resolved="$(resolve_id "$name")"
     sid="${resolved%%$'\t'*}"
     status="${resolved#*$'\t'}"
+    if [ "$sid" = "ERROR" ]; then
+        echo "::error::${name}: ${status}"
+        BROKEN_NAMES+=("$name")
+        SUMMARY_ROWS+=("| \`$name\` | LOOKUP FAILED | 0 |")
+        DETAIL_SECTIONS+=("### \`$name\` — lookup failed"$'\n'$'\n'"\`\`\`"$'\n'"$status"$'\n'"\`\`\`")
+        continue
+    fi
     if [ "$sid" = "NOTFOUND" ]; then
         echo "::error::${name}: no service named '${name}' (renamed, or not uploaded here)"
         BROKEN_NAMES+=("$name")
