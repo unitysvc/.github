@@ -21,8 +21,10 @@
 # has the full rationale for each of the four dropped services.
 
 # Plain OpenAI -> OpenAI passthrough with an UNCOMPRESSED event stream. The
-# control: if this breaks, something very general broke.
-openai/gpt-4.1-nano
+# control: if this breaks, something very general broke. gpt-5-nano since
+# 2026-11-02: OpenAI deprecated gpt-4.1-nano ("model_not_found", 404) for the
+# ops customer's key, which failed the post-deploy smoke as a gateway fault.
+openai/gpt-5-nano
 
 # ── API gateway: HTTP relay + cross-system integration (Redis, Celery) ──
 # Motivated by the msg-to-mailbox incident (2026-09): a production redeploy
