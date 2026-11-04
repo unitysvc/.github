@@ -21,8 +21,11 @@
 # has the full rationale for each of the four dropped services.
 
 # Plain OpenAI -> OpenAI passthrough with an UNCOMPRESSED event stream. The
-# control: if this breaks, something very general broke.
-openai/gpt-4.1-nano
+# control: if this breaks, something very general broke. Pick a current model:
+# gpt-4.1-nano was retired upstream (2026-11, the gateway returned 404 for it
+# while gpt-5-nano, gpt-5.4-nano and gpt-4o-mini still passed), so this is the
+# newest nano model, the one least likely to be retired next.
+openai/gpt-5.4-nano
 
 # ── API gateway: HTTP relay + cross-system integration (Redis, Celery) ──
 # Motivated by the msg-to-mailbox incident (2026-09): a production redeploy
