@@ -7,25 +7,22 @@
 # DISTINCT gateway code path or cross-system integration actually works, not
 # because the service itself is important.
 #
-# ── API gateway: LLM passthrough, basic connectivity (relocated from
-#    apisix-gateways#23 — see unitysvc/.github#<TBD> for the move) ──
+# ── API gateway: LLM passthrough ──
 #
-# Trimmed to just openai (2026-09-06): the original 5-service set each
-# proved a DISTINCT gateway code path (openai/anthropic translation +
-# streaming, nebius's gzip'd SSE, cohere's upstream_path override, bedrock's
-# SigV4 signing) — deliberately dropped in favor of one simple, reliable
-# check, since nebius/Qwen/Qwen3-32B kept failing on an upstream-account
-# issue unrelated to the gateway (genuine upstream_fault, not our bug) and
-# that noise wasn't worth carrying for a post-deploy smoke test. If deeper
+# No seller-published LLM service is listed here any more. The original
+# 5-service set (openai/anthropic translation + streaming, nebius's gzip'd
+# SSE, cohere's upstream_path override, bedrock's SigV4 signing) was trimmed
+# to just openai on 2026-09-06 because nebius kept failing on an
+# upstream-account issue unrelated to the gateway; then openai itself was
+# dropped on 2026-11-10 after gpt-4.1-nano was retired upstream (2026-11)
+# and its replacement gpt-5.4-nano failed the very next production deploy
+# (unitysvc/unitysvc run 42675799825) — a third-party model's lifecycle is
+# not something a post-deploy smoke test should depend on. LLM passthrough
+# through the API gateway is still covered by the platform service check
+# that gateway_smoke.sh always appends (p/llm/chat/completions, model=fast),
+# which is platform-owned and so cannot go stale underneath us. If deeper
 # per-code-path coverage is wanted again later, apisix-gateways#23's history
-# has the full rationale for each of the four dropped services.
-
-# Plain OpenAI -> OpenAI passthrough with an UNCOMPRESSED event stream. The
-# control: if this breaks, something very general broke. Pick a current model:
-# gpt-4.1-nano was retired upstream (2026-11, the gateway returned 404 for it
-# while gpt-5-nano, gpt-5.4-nano and gpt-4o-mini still passed), so this is the
-# newest nano model, the one least likely to be retired next.
-openai/gpt-5.4-nano
+# has the full rationale for each of the dropped services.
 
 # ── API gateway: HTTP relay + cross-system integration (Redis, Celery) ──
 # Motivated by the msg-to-mailbox incident (2026-09): a production redeploy
